@@ -126,12 +126,13 @@ covers, and a figure whose words never appear together in that company's documen
 ("lobbying expenses", "customer churn rate", "carbon offset purchases").
 
 *The table-row bonus (V8) is the smallest change and still worth 0.33 points*: it
-finds the two table questions whose row sat in a chunk BM25 ranked below the fifth
+finds the one table question whose row sat in a chunk BM25 ranked below the fifth
 place, taking recall from 97.8% to 100%.
 
 **A note on reproducibility.** The generator is an API call at temperature 0 but
-the API is not guaranteed deterministic, so the accuracy column can move by about
-one question between runs. Recall, kept and rejected come from my own code and are
+the API is not guaranteed deterministic, so the accuracy column can move by one or
+two questions between runs (B0 read 40.0% when the committed ablation.csv was
+written and 36.7% on a repeat run). Recall, kept and rejected come from my own code and are
 exactly reproducible. The last row above is the same configuration that
 `hw4.py` runs, and it matches `results.csv`.
 
