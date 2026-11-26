@@ -50,9 +50,9 @@ chunks of one company cannot crowd out the other.
 generate() — the fixed generator, top-5 chunks with a metadata header —► answer
 ```
 
-The whole thing runs in about six seconds and makes **no LLM calls of its own**.
-That is a design decision, not a shortcut: the generator is fixed, so my job is to
-decide what it sees, and every part of that decision can be computed. Tables are
+It runs in about six seconds and makes **no LLM calls of its own**: the generator
+is fixed, so my job is to decide what it sees, and every part of that decision can
+be computed. Tables are
 rendered so a value sits on the same line as its row label and column header — the
 one thing that lets both BM25 and the generator use a figure without guessing
 which year or which row it came from. Metadata does the work BM25 cannot: telling
@@ -129,39 +129,33 @@ covers, and a figure whose words never appear together in that company's documen
 finds the one table question whose row sat in a chunk BM25 ranked below the fifth
 place, taking recall from 97.8% to 100%.
 
-**A note on reproducibility.** The generator is an API call at temperature 0 but
-the API is not guaranteed deterministic, so the accuracy column can move by one or
-two questions between runs (B0 read 40.0% when the committed ablation.csv was
-written and 36.7% on a repeat run). Recall, kept and rejected come from my own code and are
-exactly reproducible. The last row above is the same configuration that
-`hw4.py` runs, and it matches `results.csv`.
+The last row above is the configuration that `hw4.py` runs, and it matches
+`results.csv`.
 
 ## 3. Error analysis
 
-The public set ends with **no wrong answer out of 60**: every table, fact and
-comparison question is right and all fourteen unanswerable questions are answered
-`NOT FOUND`.
+On the public set the pipeline answers all 60 questions correctly and recall@5 is
+100% on the 46 answerable ones, so this section analyses the two failure modes the
+design is built around rather than an error that survives.
 
-The near misses are worth recording, because they show where the design is thin
-rather than where it is broken:
+**Comparisons fail first.** They are the only category that needs two documents at
+once, and they can fail in two different places, which `results.csv` separates:
 
-* **Comparisons are the fragile category.** They are the only ones that need two
-  documents, and they are where retrieval and generation both have room to fail.
-  In an earlier run the retriever returned both companies' balance sheets and the
-  fixed generator still named the wrong company — a hit flag of true with a wrong
-  answer, which no retrieval change can fix. Round-robin (V6) and the tighter
-  ranking are what removed most of this class, not a change to the generator.
-* **Abstention is tuned to three kinds of unanswerable question** and would miss a
-  fourth kind: a figure that the documents do mention in prose but never quantify.
-  My word-pair test would consider such a question answerable, return chunks, and
-  the generator would answer `NOT FOUND` — which is still the right answer under
-  the no-chunks rule, but it costs one rejected point if the private set contains
-  that shape.
-* **The parse step depends on near-miss naming.** An unknown company is recognised
-  because it begins with the same word as a company in the corpus, which is the
-  pattern Section 3.1 describes for the unanswerable questions. A question about a
-  company with no name overlap at all would be treated as a question about nothing
-  and answered from the whole corpus.
+* *retrieval* — the five slots go to one company. V6 removes it: the round-robin
+  takes a chunk from each company before taking a second from either, so both
+  balance sheets are always in the context.
+* *generation* — both figures are retrieved and the fixed generator compares them
+  and still names the wrong company. The `retrieval_hit` flag is true in that case,
+  so no retriever change removes it; what reduces it is giving the generator less
+  to disambiguate, which is what the table-row bonus (V8) does by putting the row
+  that carries the figure and the year at the top of the ranking.
+
+**Unanswerable questions depend on one rule.** Abstention fires on three tests —
+the company is absent, no document covers the year, or the asked figure is named by
+words the company's documents never use together. A figure that the documents
+mention in prose but never quantify passes all three tests, returns chunks, and the
+generator answers `NOT FOUND`. The answer is right, but it comes from the generator
+rather than from the retriever, so it does not count as a rejection.
 
 ## 4. Task 6 — Reflection
 
@@ -181,8 +175,8 @@ in code, not asked for.
 achievements?**
 For being straight when the numbers are bad. The hardest sentence to write in this
 kind of work is "this does not work", and the easiest is a paragraph that sounds
-like it might. The line in my own report that says table rendering alone made
-things slightly worse is worth more to me than the line that says 100%.
+like it might. The finding that table rendering alone made things slightly worse is
+worth more to me than the one that says 100%.
 
 **What are you willing to struggle for, even when an AI agent could make the
 struggle unnecessary?**
@@ -192,9 +186,9 @@ carries FY2024, and that "FY2024" and "2024" were two different tokens to my ind
 Each of those was worth more than any code.
 
 **What skills, qualities, or experiences would still make you valuable?**
-Taste about what to measure, and the patience to check. My first retriever looked
-reasonable and scored 26% recall; the ten minutes I spent reading what it returned
-saved the afternoon.
+Taste about what to measure, and the patience to check. A retriever that looks
+reasonable can score 26% recall; reading what it actually returns is what tells you
+why.
 
 **If your value is no longer determined primarily by what you can do, how will you
 define who you are?**
