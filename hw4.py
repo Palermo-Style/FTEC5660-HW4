@@ -33,17 +33,209 @@ load_dotenv()
 # Your code: add imports, constants and helper functions here.
 # =============================================================================
 
+import math
+from collections import Counter
+
+from bs4 import BeautifulSoup
+
+# Filled while chunk_document runs, so parse_query can see the corpus.
+CORPUS_COMPANIES: dict[str, str] = {}   # company key -> company name as printed
+CORPUS_BROKERS: set[str] = set()
+CORPUS_LABELS: set[str] = set()         # table row labels: region and segment names
+QUESTION_WORDS = {"what", "which", "how", "when", "where", "who", "why", "whom", "whose"}
+
+DOC_MARKERS = {
+    "annual_report": "annual report",
+    "earnings_call": "earnings conference call",
+    "research_report": "results review",
+}
+BROKER_SUFFIXES = ("securities", "capital", "research", "bank", "partners", "equity")
+NOT_A_COMPANY = {
+    "annual report", "earnings call", "earnings conference call", "conference call",
+    "fourth quarter", "full year", "chief financial officer", "chief executive officer",
+    "chief operating officer", "general counsel", "chair of the board", "board of directors",
+    "audit committee", "independent non-executive director", "second quarter", "third quarter",
+    "first quarter", "united states", "hong kong", "new york",
+}
+STOPWORDS = set("""a an the of and or in on at to for from by with as is are was were be been
+this that these those it its their they them we our us you your i he she his her not no
+than then so such which who whom whose what when where why how much many did do does done
+have has had will would should could can may might must also more most other others same
+between both each any all some if but about into over under during end year years fy
+company company's group please give tell according report reports question answer""".split())
+
+
+def collapse(text: str) -> str:
+    """One line, single spaces."""
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def strip_legal(name: str) -> str:
+    """'Northgate Robotics Inc.' -> 'northgate robotics' (case, punctuation and legal suffix removed)."""
+    text = unicodedata.normalize("NFKC", name).lower().replace("&", " and ")
+    words = re.sub(r"[^a-z0-9]+", " ", text).split()
+    return " ".join(w for w in words if w not in {"inc", "corp", "corporation", "ltd", "limited", "plc", "llc", "co"})
+
+
+def tokens(text: str) -> list[str]:
+    """Lower-case word tokens, numbers without thousands separators, light plural stripping."""
+    text = unicodedata.normalize("NFKC", str(text)).lower()
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+    text = re.sub(r"\bfy\s?(\d{4})\b", r"\1", text)      # FY2024 and 2024 are the same year
+    out = []
+    for raw in re.split(r"[^a-z0-9.]+", text):
+        raw = raw.strip(".")
+        if len(raw) < 2 or raw in STOPWORDS:
+            continue
+        if len(raw) > 3 and raw.endswith("s") and not raw.endswith("ss"):
+            raw = raw[:-1]
+        out.append(raw)
+    return out
+
+
+def cell_text(cell) -> str:
+    return collapse(cell.get_text(" ", strip=True))
+
 
 def table_to_text(table_html: str) -> str:
-    """Task 1.1: turn one HTML <table> into text that keeps every value with its row and its column.
+    """Task 1.1: one line per table row: row label, then 'column header: value' pairs, then the caption."""
+    soup = BeautifulSoup(table_html, "lxml")
+    table = soup.find("table") or soup
+    lines = []
+    caption = table.find("caption")
+    if caption is not None:
+        lines.append(cell_text(caption))
+    heads = [cell_text(th) for th in table.select("thead th")]
+    row_head = heads[0].lower() if heads else ""
+    headers = heads[1:] if row_head in ("", "name", "company", "segment", "region", "function") else heads
+    for tr in table.select("tbody tr"):
+        cells = tr.find_all(["td", "th"], recursive=False)
+        if not cells:
+            continue
+        label = cell_text(cells[0])
+        values = [cell_text(c) for c in cells[1:]]
+        if not label:
+            continue
+        if not values:                      # a section row such as "Current assets"
+            lines.append(label)
+            continue
+        pairs = [f"{h}: {v}" for h, v in zip(headers, values) if h and v]
+        lines.append(f"{label} | " + " | ".join(pairs) if pairs else label)
+    # A row can get long; keep every line inside the 400-character limit by splitting on the pairs.
+    out = []
+    for line in lines:
+        while len(line) > 390:
+            cut = line.rfind(" | ", 0, 390)
+            if cut <= 0:
+                break
+            out.append(line[:cut])
+            head, _, rest = line.partition(" | ")
+            line = f"{head} | {rest[cut + 3:]}"
+        out.append(line)
+    return "\n".join(out)
 
-    Put each value on a line (at most 400 characters) together with its row label and its column
-    header, e.g. "Revenue | 2025: 2,710.4 | 2024: 2,629.1", one table row per line, keep the text of
-    every cell unchanged, and include the caption (it holds the unit) in the output. Do not call the
-    LLM here.
-    """
-    ### YOUR CODE HERE
-    return ""
+
+def document_meta(file_name: str, html: str) -> dict:
+    """doc_type, company and fiscal year, all read from the first lines of the document."""
+    soup = BeautifulSoup(html, "lxml")
+    h1 = collapse(soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else ""
+    text = collapse(soup.get_text(" ", strip=True))
+    company = re.sub(r"\s*\([^()]*\)\s*$", "", h1).strip()
+    head = collapse(text[:400]).lower()
+    if "earnings conference call" in head or "earnings call" in head:
+        doc_type = "earnings_call"
+        match = re.search(r"full year (\d{4})", text, re.I)
+    elif "annual report" in head:
+        doc_type = "annual_report"
+        match = re.search(r"annual report (\d{4})", text, re.I) or re.search(r"year ended 31 december (\d{4})", text, re.I)
+    else:
+        doc_type = "research_report"
+        match = re.search(r"FY(\d{4}) results review", text)
+    fiscal_year = int(match.group(1)) if match else 2025
+    return {"source": file_name, "company": company, "fiscal_year": fiscal_year, "doc_type": doc_type}
+
+
+def document_blocks(html: str) -> list[tuple[str, str]]:
+    """(section title, text) blocks in document order; tables go through table_to_text."""
+    soup = BeautifulSoup(html, "lxml")
+    body = soup.find("body") or soup
+    blocks: list[tuple[str, str]] = []
+    section = ""
+    for el in body.find_all(["h1", "h2", "h3", "p", "ul", "ol", "table"]):
+        if any(a.name in {"h1", "h2", "h3", "p", "ul", "ol", "table"} for a in el.parents if a is not body):
+            continue
+        if el.name in ("h1", "h2", "h3"):
+            title = cell_text(el)
+            if el.name == "h1":
+                continue
+            section = title
+            continue
+        if el.name == "table":
+            text = table_to_text(str(el))
+            for tr in el.select("tbody tr"):          # remember row labels: regions, segments, line items
+                cells = tr.find_all(["td", "th"], recursive=False)
+                if cells:
+                    CORPUS_LABELS.add(strip_legal(cell_text(cells[0])))
+        elif el.name in ("ul", "ol"):
+            text = "\n".join("- " + cell_text(li) for li in el.find_all("li"))
+        else:
+            text = cell_text(el)
+        text = text.strip()
+        if text:
+            blocks.append((section, text))
+    return blocks
+
+
+def split_text(text: str, room: int) -> list[str]:
+    """Split into pieces of at most *room* characters without breaking a line (a table row)."""
+    if len(text) <= room:
+        return [text]
+    lines = text.split("\n")
+    if len(lines) == 1:
+        lines = text.split(" ")
+        joiner = " "
+    else:
+        joiner = "\n"
+    pieces: list[str] = []
+    current = ""
+    for line in lines:
+        if current and len(current) + len(line) + 1 > room:
+            pieces.append(current.rstrip())
+            current = ""
+        current += line + joiner
+    if current.strip():
+        pieces.append(current.rstrip())
+    return pieces
+
+
+def pack_chunks(blocks: list[tuple[str, str]], meta: dict) -> list[Document]:
+    """Group blocks into chunks under MAX_CHUNK_CHARS, each with a metadata header line."""
+    company, year, doc_type = meta["company"], meta["fiscal_year"], meta["doc_type"]
+    chunks: list[Document] = []
+    buf: list[str] = []
+    used = 0
+    section = ""
+
+    def flush():
+        nonlocal buf, used
+        if buf:
+            header = f"{company} | {doc_type.replace('_', ' ')} FY{year} | {section or 'document'}"
+            body = "\n".join(buf)[:MAX_CHUNK_CHARS - len(header) - 1]
+            chunks.append(Document(page_content=header + "\n" + body, metadata=dict(meta)))
+            buf, used = [], 0
+
+    for block_section, text in blocks:
+        if block_section and block_section != section:
+            flush()                      # the buffered blocks belong to the previous section
+            section = block_section
+        room = max(MAX_CHUNK_CHARS - (len(company) + len(section) + 40), 300)
+        for piece in split_text(text, room):
+            if used + len(piece) + 1 > room and buf:
+                flush()
+            buf.append(piece)
+            used += len(piece) + 1
+    flush()
+    return chunks
 
 
 def chunk_document(file_name: str, html: str) -> list[Document]:
@@ -53,7 +245,19 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     "doc_type" (one of DOC_TYPES). Do not call the LLM here.
     """
     ### YOUR CODE HERE
-    return []
+    meta = document_meta(file_name, html)
+    chunks = pack_chunks(document_blocks(html), meta)
+    if meta["company"]:
+        CORPUS_COMPANIES.setdefault(strip_legal(meta["company"]), meta["company"])
+    if meta["doc_type"] == "research_report":
+        first = BeautifulSoup(html, "lxml").get_text(" ", strip=True)[:200]
+        broker = first.split("|")[0].strip()
+        if broker:
+            CORPUS_BROKERS.add(strip_legal(broker))
+    return chunks
+
+
+CAPITAL_RUN = re.compile(r"\b([A-Z][\w&'\-]*(?:\s+(?:of|and|&|the|[A-Z][\w&'\-]*)){1,4})")
 
 
 def parse_query(question: str) -> dict:
@@ -62,7 +266,85 @@ def parse_query(question: str) -> dict:
     The rules for each field are under Task 2.2 in the handout. You may use make_llm() here.
     """
     ### YOUR CODE HERE
-    return {}
+    text = collapse(question)
+    flat = strip_legal(text)
+    companies: list[str] = []
+    for key, printed in sorted(CORPUS_COMPANIES.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", flat):
+            companies.append(printed)
+    taken = strip_legal(" ".join(companies))
+    for match in CAPITAL_RUN.finditer(text):
+        run = match.group(1).replace("'s", "").strip()
+        words = run.split()
+        while words and words[-1].lower() in ("of", "and", "the", "&"):
+            words.pop()
+        run = " ".join(words)
+        key = strip_legal(run)
+        if len(words) < 2 or not key or key in taken or key in CORPUS_BROKERS:
+            continue
+        if key in NOT_A_COMPANY or key in CORPUS_LABELS or words[-1].lower() in BROKER_SUFFIXES:
+            continue
+        if any(key in label for label in CORPUS_LABELS):      # "Middle East and Africa" is a table row
+            continue
+        if words[0].lower() in QUESTION_WORDS:
+            continue
+        if any(key in strip_legal(c) or strip_legal(c) in key for c in companies):
+            continue
+        if any(word.lower() in ("fy", "fy20", "q1", "q2", "q3", "q4") for word in words):
+            continue
+        companies.append(run)
+        taken += " " + key
+
+    year = None
+    for pattern in (r"FY\s?(\d{4})", r"\b(20\d{2})\b"):
+        found = re.search(pattern, text)
+        if found:
+            year = int(found.group(1))
+            break
+
+    lower = text.lower()
+    if "earnings call" in lower or "conference call" in lower or "call transcript" in lower:
+        doc_type = "earnings_call"
+    elif re.search(r"\b(rating|target price|price target|forecast|estimate|estimates|"
+                   r"results review|broker|recommendation|analyst)\b", lower):
+        doc_type = "research_report"
+    else:
+        doc_type = "annual_report"
+    return {"companies": companies, "fiscal_year": year, "doc_type": doc_type}
+
+
+class BM25:
+    """Plain BM25 over token lists."""
+
+    def __init__(self, documents: list[list[str]], k1: float = 1.5, b: float = 0.75) -> None:
+        self.docs = documents
+        self.k1, self.b = k1, b
+        self.n = len(documents)
+        self.avgdl = sum(len(d) for d in documents) / max(self.n, 1)
+        self.freqs = [Counter(d) for d in documents]
+        df: Counter = Counter()
+        for freq in self.freqs:
+            df.update(freq.keys())
+        self.idf = {t: math.log(1.0 + (self.n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
+
+    def scores(self, query: list[str]) -> list[float]:
+        out = [0.0] * self.n
+        for term in query:
+            idf = self.idf.get(term)
+            if idf is None:
+                continue
+            for i, freq in enumerate(self.freqs):
+                tf = freq.get(term, 0)
+                if not tf:
+                    continue
+                norm = tf * (self.k1 + 1) / (tf + self.k1 * (1 - self.b + self.b * len(self.docs[i]) / max(self.avgdl, 1e-9)))
+                out[i] += idf * norm
+        return out
+
+
+# A document of type T with fiscal year Y covers the years [Y - back, Y + ahead].
+# The FY2025 annual report also shows FY2024, and a FY2025 results review carries FY2024A to FY2027E.
+YEAR_WINDOW = {"annual_report": (1, 0), "earnings_call": (0, 1), "research_report": (1, 2)}
 
 
 def build_index(chunks: list[Document]) -> Any:
@@ -71,7 +353,55 @@ def build_index(chunks: list[Document]) -> Any:
     Return anything retrieve() needs: a BM25 or TF-IDF index, the chunks grouped by metadata, ...
     """
     ### YOUR CODE HERE
-    return None
+    chunks = [c for c in chunks if isinstance(c, Document) and c.page_content]
+    texts = [tokens(c.page_content) for c in chunks]
+    groups: dict[tuple[str, str, int], list[int]] = {}
+    for i, chunk in enumerate(chunks):
+        meta = chunk.metadata or {}
+        key = (strip_legal(meta.get("company", "")), str(meta.get("doc_type", "")),
+               int(meta.get("fiscal_year", 0) or 0))
+        groups.setdefault(key, []).append(i)
+    return {"chunks": chunks, "bm25": BM25(texts), "groups": groups,
+            "company_text": _company_text(chunks)}
+
+
+def _company_text(chunks: list[Document]) -> dict[str, str]:
+    """All text of each company, lower-cased, for the 'is this figure disclosed' check."""
+    out: dict[str, list[str]] = {}
+    for chunk in chunks:
+        key = strip_legal((chunk.metadata or {}).get("company", ""))
+        out.setdefault(key, []).append(chunk.page_content)
+    return {key: " ".join(parts).lower() for key, parts in out.items()}
+
+
+ASKED_BEFORE = re.compile(r"\b(?:what|which|how much|how many)\b.*?\b(?:did|does|do|was|were|is|are|had|has|have)?\b", re.I)
+GENERIC = {"company", "reported", "report", "reports", "fy", "year", "years", "end", "hold", "held"}
+# Words that only phrase the question; they are not the name of a figure.
+PHRASING = {"value", "city", "generate", "earn", "spend", "hold", "held", "announce", "guide",
+            "large", "largest", "much", "many", "firm", "business", "audit", "audited"}
+
+
+def _asked_terms(question: str) -> list[str]:
+    """The normalised words that name the figure being asked for, e.g. 'lobbying expense'."""
+    text = collapse(question)
+    text = re.sub(r"\b(?:at|on|in|for|during)\s+(?:the\s+)?(?:end\s+of\s+)?(?:31\s+december\s+|fy\s?)?\d{4}\b", " ", text, flags=re.I)
+    text = re.sub(r"\bin (?:usd|percent|us dollars?).*$", " ", text, flags=re.I)
+    return tokens(text)
+
+
+def _disclosed(question: str, company: str, company_tokens: str) -> bool:
+    """False when the asked figure is named by words the company's documents never use together.
+
+    'lobbying expenses' or 'customer churn rate' never appear in the corpus, so it cannot answer
+    them; 'accounts receivable' does appear, so it can.
+    """
+    name_words = set(tokens(company))
+    terms = [w for w in _asked_terms(question) if w not in GENERIC and w not in PHRASING and w not in name_words]
+    pairs = [f"{a} {b}" for a, b in zip(terms, terms[1:])]
+    if not pairs:
+        return True
+    haystack = " " + " ".join(tokens(company_tokens)) + " "
+    return any(f" {pair} " in haystack for pair in pairs)
 
 
 def retrieve(index: Any, question: str) -> list[Document]:
@@ -80,7 +410,53 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
-    return []
+    parsed = parse_query(question)
+    chunks = index["chunks"]
+    groups = index["groups"]
+    named = [strip_legal(c) for c in parsed["companies"]]
+    known = [c for c in named if any(key[0] == c for key in groups)]
+    if named and not known:
+        return []                                   # the company is not in the corpus
+    companies = known or sorted({key[0] for key in groups})
+    year, doc_type = parsed["fiscal_year"], parsed["doc_type"]
+
+    candidates: list[int] = []
+    back, ahead = YEAR_WINDOW[doc_type]
+    for company in companies:
+        for (group_company, group_type, doc_year), indices in groups.items():
+            if group_company != company or group_type != doc_type:
+                continue
+            if year is not None and not (doc_year - back <= year <= doc_year + ahead):
+                continue
+            candidates.extend(indices)
+    if not candidates:
+        return []                                   # the year is not covered by the corpus
+    if len(companies) == 1 and not _disclosed(question, companies[0], index["company_text"].get(companies[0], "")):
+        return []                                   # the figure is not disclosed
+
+    scores = index["bm25"].scores(tokens(question))
+    name_words: set[str] = set()
+    for name in companies:
+        name_words.update(tokens(name))
+    metric = [w for w in _asked_terms(question)
+              if w not in PHRASING and w not in GENERIC and w not in name_words][:4]
+    for i in candidates:                   # a table row that names the figure and the year wins
+        if not metric:
+            break
+        for line in chunks[i].page_content.lower().splitlines():
+            if all(word in line for word in metric) and (year is None or str(year) in line):
+                scores[i] += 3.0
+                break
+    ranked: dict[str, list[int]] = {}
+    for company in companies:
+        own = [i for i in candidates if strip_legal((chunks[i].metadata or {}).get("company", "")) == company]
+        ranked[company] = sorted(own, key=lambda i: -scores[i])
+    chosen: list[int] = []
+    for round_number in range(MAX_RETRIEVED):                 # round-robin, so a comparison gets both sides
+        for company in companies:
+            if round_number < len(ranked[company]) and len(chosen) < MAX_RETRIEVED:
+                chosen.append(ranked[company][round_number])
+    return [chunks[i] for i in chosen[:MAX_RETRIEVED]]
 
 
 # =============================================================================
