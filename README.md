@@ -161,3 +161,46 @@ rather than where it is broken:
   pattern Section 3.1 describes for the unanswerable questions. A question about a
   company with no name overlap at all would be treated as a question about nothing
   and answered from the whole corpus.
+
+## 4. Task 6 — Reflection
+
+**What kind of person would you want to be in that world?**
+The one who decides what is worth doing, and who can tell whether what came back is
+any good. This homework is a small version of that: the generator was given to me
+and wrote every answer, and everything that decided whether an answer was right —
+what it was allowed to see — was mine.
+
+**Which of your current ambitions would still matter?**
+The ones about judgment rather than throughput. I want my "this is probably wrong"
+to be worth listening to. The model produced a confident, well-formed answer for
+every question; the reason the scores are right is that the verdicts were computed
+in code, not asked for.
+
+**What would you want to be known for beyond your productivity and professional
+achievements?**
+For being straight when the numbers are bad. The hardest sentence to write in this
+kind of work is "this does not work", and the easiest is a paragraph that sounds
+like it might. The line in my own report that says table rendering alone made
+things slightly worse is worth more to me than the line that says 100%.
+
+**What are you willing to struggle for, even when an AI agent could make the
+struggle unnecessary?**
+Understanding the data before modelling it. I could have let an agent write the
+retriever in one go; instead I read the tables and found that the FY2025 report also
+carries FY2024, and that "FY2024" and "2024" were two different tokens to my index.
+Each of those was worth more than any code.
+
+**What skills, qualities, or experiences would still make you valuable?**
+Taste about what to measure, and the patience to check. My first retriever looked
+reasonable and scored 26% recall; the ten minutes I spent reading what it returned
+saved the afternoon.
+
+**If your value is no longer determined primarily by what you can do, how will you
+define who you are?**
+By what I choose to take responsibility for. An agent can write the retriever; it
+cannot decide that a wrong "PASS" is worse than a cautious "NOT FOUND". I would
+rather be the person who signs off on that choice.
+
+**What should you start doing differently tomorrow?**
+Run the boring measurement before the clever fix, and write down the number each
+change replaced, because "it felt better" is not a result.

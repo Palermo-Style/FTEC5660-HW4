@@ -65,7 +65,7 @@ def collapse(text: str) -> str:
 
 
 def strip_legal(name: str) -> str:
-    """'Northgate Robotics Inc.' -> 'northgate robotics' (case, punctuation and legal suffix removed)."""
+    """The matching key of a company name: lower case, no punctuation, no legal suffix."""
     text = unicodedata.normalize("NFKC", name).lower().replace("&", " and ")
     words = re.sub(r"[^a-z0-9]+", " ", text).split()
     return " ".join(w for w in words if w not in {"inc", "corp", "corporation", "ltd", "limited", "plc", "llc", "co"})
@@ -217,7 +217,7 @@ def parse_query(question: str) -> dict:
                  if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", flat)]
     known = {strip_legal(name) for name in companies}
     # A company the corpus does not have is asked about by a name that starts like one it does
-    # ("Halcyon Air Cargo" next to "Halcyon Freight"), so the first word identifies it.
+    # (a name that is not in the corpus next to one that is), so the first word identifies it.
     first_words = {key.split()[0] for key in CORPUS_COMPANIES}
     for run in CAPITAL_RUN.findall(text):
         words = run.replace("'s", "").split()
@@ -227,7 +227,7 @@ def parse_query(question: str) -> dict:
         if len(words) < 2 or key in known or key.split()[0] not in first_words:
             continue
         if any(key.startswith(name + " ") for name in known):
-            continue                        # "Halcyon Freight's Chief Financial Officer"
+            continue                        # a known name followed by a job title
         companies.append(" ".join(words))
 
     found = re.search(r"FY\s?(\d{4})", text) or re.search(r"\b(20\d{2})\b", text)
