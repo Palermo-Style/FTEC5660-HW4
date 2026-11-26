@@ -1,7 +1,8 @@
 """Task 5: the ablation study behind the "Homework 4 solution" table.
 
 Each configuration changes one component relative to the row above it and is
-measured on public_test with the same fixed generator and scoring as hw4.py.
+measured on public_test with the same fixed generator and the same scoring code
+as hw4.py.
 
     python3 ablation.py --data-folder public_test
 
@@ -11,116 +12,118 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
 
 import hw4
-from hw4 import Document, MAX_RETRIEVED
+from hw4 import MAX_RETRIEVED, Document
 
-
-# --------------------------------------------------------------------------- configuration
 CONFIGS = [
-    ("B0", dict(table=False, sections=False, parse=False, year=False, roundrobin=False,
-                abstain=False, bonus=False)),
-    ("V1", dict(table=True, sections=False, parse=False, year=False, roundrobin=False,
-                abstain=False, bonus=False)),
-    ("V2", dict(table=True, sections=True, parse=False, year=False, roundrobin=False,
-                abstain=False, bonus=False)),
-    ("V3", dict(table=True, sections=True, parse=True, year=False, roundrobin=False,
-                abstain=False, bonus=False)),
-    ("V4", dict(table=True, sections=True, parse=True, year=True, roundrobin=False,
-                abstain=False, bonus=False)),
-    ("V5", dict(table=True, sections=True, parse=True, year=True, roundrobin=True,
-                abstain=False, bonus=False)),
-    ("V6", dict(table=True, sections=True, parse=True, year=True, roundrobin=True,
-                abstain=True, bonus=False)),
-    ("V7", dict(table=True, sections=True, parse=True, year=True, roundrobin=True,
-                abstain=True, bonus=True)),
+    ("B0", dict(table=False, sections=False, tokens=False, parse=False, year=False,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V1", dict(table=True, sections=False, tokens=False, parse=False, year=False,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V2", dict(table=True, sections=True, tokens=False, parse=False, year=False,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V3", dict(table=True, sections=True, tokens=True, parse=False, year=False,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V4", dict(table=True, sections=True, tokens=True, parse=True, year=False,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V5", dict(table=True, sections=True, tokens=True, parse=True, year=True,
+                roundrobin=False, abstain=False, bonus=False)),
+    ("V6", dict(table=True, sections=True, tokens=True, parse=True, year=True,
+                roundrobin=True, abstain=False, bonus=False)),
+    ("V7", dict(table=True, sections=True, tokens=True, parse=True, year=True,
+                roundrobin=True, abstain=True, bonus=False)),
+    ("V8", dict(table=True, sections=True, tokens=True, parse=True, year=True,
+                roundrobin=True, abstain=True, bonus=True)),
 ]
 CHANGE = {
-    "B0": "naive baseline: BeautifulSoup get_text(), fixed 1000-character splits, "
-          "required metadata only, BM25 top-5 over the whole corpus, no query parsing, never abstains",
+    "B0": "naive baseline: get_text(), RecursiveCharacterTextSplitter(1000/100), required "
+          "metadata only, BM25 top-5 over the whole corpus, no query parsing, never abstains",
     "V1": "table_to_text() renders every table as 'label | column: value' lines",
     "V2": "section-aware chunking, each chunk carries a company/doctype/FY/section header",
-    "V3": "parse_query() metadata filter: only chunks of the named company and document type",
-    "V4": "fiscal-year window: an annual report also covers the previous year",
-    "V5": "comparison questions retrieve per company in round-robin instead of one ranking",
-    "V6": "abstention: [] when the company is absent, the year is not covered, or the figure is never named",
-    "V7": "table-row bonus: a row naming the asked figure and the year is boosted",
+    "V3": "tokeniser: numbers lose thousands separators, plurals stemmed, FY2024 -> 2024",
+    "V4": "parse_query() metadata filter: only the named company and document type",
+    "V5": "fiscal-year window: an annual report also covers the previous year",
+    "V6": "comparison questions retrieve per company in round-robin",
+    "V7": "abstention: [] when the company is absent, the year is uncovered, or the figure is never named",
+    "V8": "table-row bonus: a row naming the asked figure and the year is boosted",
 }
 
+SPLITTER = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-def fixed_split(text: str, size: int = 1000, overlap: int = 100) -> list[str]:
-    """A plain fixed-size splitter with overlap (stands in for RecursiveCharacterTextSplitter)."""
-    pieces, start = [], 0
-    while start < len(text):
-        pieces.append(text[start:start + size])
-        if start + size >= len(text):
-            break
-        start += size - overlap
-    return [p for p in pieces if p.strip()]
+
+def plain_tokens(text: str) -> list[str]:
+    """The naive tokeniser: lower-cased whitespace tokens."""
+    return str(text).lower().split()
 
 
 def build_chunks(corpus: dict[str, str], cfg: dict) -> list[Document]:
-    """Chunks for one configuration: naive splitting, or hw4.chunk_document when sections are on."""
+    """Chunks for one configuration."""
+    if cfg["sections"]:
+        return [chunk for file_name, html in corpus.items() for chunk in hw4.chunk_document(file_name, html)]
     chunks: list[Document] = []
     for file_name, html in corpus.items():
         meta = hw4.document_meta(file_name, html)
-        if cfg["sections"]:
-            chunks.extend(hw4.chunk_document(file_name, html))
-            continue
         soup = BeautifulSoup(html, "lxml")
         if cfg["table"]:
             for table in soup.find_all("table"):
                 rendered = hw4.table_to_text(str(table))
                 table.replace_with(BeautifulSoup(f"<p>{rendered}</p>", "lxml").get_text())
-        text = soup.get_text("\n", strip=True)
-        for piece in fixed_split(text):
+        for piece in SPLITTER.split_text(soup.get_text("\n", strip=True)):
             chunks.append(Document(page_content=piece, metadata=dict(meta)))
     return chunks
 
 
-def retrieve_cfg(index, question: str, cfg: dict) -> list[Document]:
-    """Retrieval for one configuration, mirroring hw4.retrieve when every flag is on."""
-    chunks = index["chunks"]
-    scores = index["bm25"].scores(hw4.tokens(question))
-    if not cfg["parse"]:
-        order = sorted(range(len(chunks)), key=lambda i: -scores[i])
-        return [chunks[i] for i in order[:MAX_RETRIEVED]]
+def build_index(chunks: list[Document], tokenizer) -> dict:
+    groups: dict[tuple[str, str, int], list[int]] = {}
+    text_by_company: dict[str, list[str]] = {}
+    for i, chunk in enumerate(chunks):
+        meta = chunk.metadata or {}
+        company = hw4.strip_legal(meta.get("company", ""))
+        groups.setdefault((company, meta.get("doc_type"), int(meta.get("fiscal_year", 0) or 0)), []).append(i)
+        text_by_company.setdefault(company, []).append(chunk.page_content)
+    return {"chunks": chunks, "groups": groups,
+            "bm25": BM25Okapi([tokenizer(c.page_content) for c in chunks]),
+            "company_text": {k: " ".join(v) for k, v in text_by_company.items()}}
+
+
+def retrieve_cfg(index: dict, question: str, cfg: dict):
+    tokenizer = hw4.tokens if cfg["tokens"] else plain_tokens
+    chunks, groups, company_text = index["chunks"], index["groups"], index["company_text"]
+    scores = list(index["bm25"].get_scores(tokenizer(question)))
+
+    if not cfg["parse"]:                            # B0..V3: one ranking over the whole corpus
+        return [chunks[i] for i in sorted(range(len(chunks)), key=lambda i: -scores[i])[:MAX_RETRIEVED]]
 
     parsed = hw4.parse_query(question)
     named = [hw4.strip_legal(c) for c in parsed["companies"]]
-    known = [c for c in named if any(key[0] == c for key in index["groups"])]
+    known = [c for c in named if c in company_text]
     if cfg["abstain"] and named and not known:
         return []
-    companies = known or sorted({key[0] for key in index["groups"]})
+    companies = known or list(company_text)
     doc_type = parsed["doc_type"]
     year = parsed["fiscal_year"] if cfg["year"] else None
-
-    candidates: list[int] = []
     back, ahead = hw4.YEAR_WINDOW[doc_type]
-    for company in companies:
-        for (group_company, group_type, doc_year), indices in index["groups"].items():
-            if group_company != company or group_type != doc_type:
-                continue
-            if year is not None and not (doc_year - back <= year <= doc_year + ahead):
-                continue
-            candidates.extend(indices)
+    candidates = [i for (company, kind, doc_year), indices in groups.items()
+                  if company in companies and kind == doc_type
+                  and (year is None or doc_year - back <= year <= doc_year + ahead)
+                  for i in indices]
     if not candidates:
         return []
     if cfg["abstain"] and len(companies) == 1 and \
-            not hw4._disclosed(question, companies[0], index["company_text"].get(companies[0], "")):
+            not hw4.disclosed(question, companies[0], company_text[companies[0]]):
         return []
 
     if cfg["bonus"]:
-        name_words: set[str] = set()
-        for name in companies:
-            name_words.update(hw4.tokens(name))
-        metric = [w for w in hw4._asked_terms(question)
+        name_words = {w for company in companies for w in tokenizer(company)}
+        metric = [w for w in hw4.asked_terms(question)
                   if w not in hw4.PHRASING and w not in hw4.GENERIC and w not in name_words][:4]
         if metric:
             for i in candidates:
@@ -129,57 +132,47 @@ def retrieve_cfg(index, question: str, cfg: dict) -> list[Document]:
                         scores[i] += 3.0
                         break
 
-    if cfg["roundrobin"]:
-        chosen: list[int] = []
-        ranked = {}
-        for company in companies:
-            own = [i for i in candidates if hw4.strip_legal((chunks[i].metadata or {}).get("company", "")) == company]
-            ranked[company] = sorted(own, key=lambda i: -scores[i])
-        for round_number in range(MAX_RETRIEVED):
-            for company in companies:
-                if round_number < len(ranked[company]) and len(chosen) < MAX_RETRIEVED:
-                    chosen.append(ranked[company][round_number])
-        return [chunks[i] for i in chosen[:MAX_RETRIEVED]]
+    if not cfg["roundrobin"]:
+        return [chunks[i] for i in sorted(candidates, key=lambda i: -scores[i])[:MAX_RETRIEVED]]
 
-    order = sorted(candidates, key=lambda i: -scores[i])
-    return [chunks[i] for i in order[:MAX_RETRIEVED]]
+    ranked = {company: sorted((i for i in candidates
+                               if hw4.strip_legal((chunks[i].metadata or {}).get("company", "")) == company),
+                              key=lambda i: -scores[i])
+              for company in companies}
+    chosen: list[int] = []
+    for round_number in range(MAX_RETRIEVED):
+        for company in companies:
+            if round_number < len(ranked[company]) and len(chosen) < MAX_RETRIEVED:
+                chosen.append(ranked[company][round_number])
+    return [chunks[i] for i in chosen]
 
 
 def measure(corpus, questions, gold, cfg) -> dict:
     chunks = build_chunks(corpus, cfg)
-    index = hw4.build_index(chunks)
-    hits, kept, rejected, correct = 0, 0, 0, 0
-    answerable = [q for q in questions if gold[q]["evidence"]]
-    unanswerable = [q for q in questions if not gold[q]["evidence"]]
+    index = build_index(chunks, hw4.tokens if cfg["tokens"] else plain_tokens)
 
-    def one(qid):
+    def one(qid: str):
         got = retrieve_cfg(index, questions[qid], cfg)
-        answer = hw4.generate(questions[qid], got)
-        return got, answer
+        return got, hw4.generate(questions[qid], got)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = dict(zip(questions, pool.map(one, questions)))
-    for qid in questions:
-        got, answer = results[qid]
-        if gold[qid]["evidence"]:
-            hits += hw4.retrieval_hit(got, gold[qid])
-            kept += bool(got)
-        else:
-            rejected += not got
-        correct += hw4.answer_correct(answer, gold[qid])
+    answerable = [q for q in questions if gold[q]["evidence"]]
+    unanswerable = [q for q in questions if not gold[q]["evidence"]]
+    hits = sum(hw4.retrieval_hit(results[q][0], gold[q]) for q in answerable)
+    kept = sum(bool(results[q][0]) for q in answerable)
+    rejected = sum(not results[q][0] for q in unanswerable)
+    correct = sum(hw4.answer_correct(results[q][1], gold[q]) for q in questions)
     recall = hits / max(len(answerable), 1)
     kept_rate = kept / max(len(answerable), 1)
     rejected_rate = rejected / max(len(unanswerable), 1)
     accuracy = correct / max(len(questions), 1)
-    points = {
-        "2.1": 5 * kept_rate,
-        "2.3": 15 * max(0.0, min(1.0, (recall - 0.5) / 0.4)),
-        "3": 10 * max(0.0, kept_rate + rejected_rate - 1),
-        "4": 20 * accuracy,
-    }
-    return {"recall": recall, "kept": kept_rate, "rejected": rejected_rate,
-            "accuracy": accuracy, "points": points, "total": sum(points.values()),
-            "chunks": len(chunks)}
+    points = {"2.1": 5 * kept_rate,
+              "2.3": 15 * max(0.0, min(1.0, (recall - 0.5) / 0.4)),
+              "3": 10 * max(0.0, kept_rate + rejected_rate - 1),
+              "4": 20 * accuracy}
+    return {"recall": recall, "kept": kept_rate, "rejected": rejected_rate, "accuracy": accuracy,
+            "points": points, "total": sum(points.values()), "chunks": len(chunks)}
 
 
 def main() -> int:
